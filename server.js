@@ -12,17 +12,34 @@ app.get('/get-dailymotion-stream', async (req, res) => {
     }
 
     try {
-        // Cabeceras completas para omitir el filtro de seguridad 403 de Dailymotion
-        const headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-            'Accept': '*/*',
-            'Accept-Language': 'es-ES,es;q=0.9,en;q=0.8',
-            'Referer': `https://www.dailymotion.com/embed/video/${videoId}`,
-            'Origin': 'https://www.dailymotion.com'
-        };
+        const userAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36';
+        const embedUrl = `https://www.dailymotion.com/embed/video/${videoId}`;
 
-        // 1. Obtener la metadata desde la API
-        const metaResponse = await axios.get(`https://www.dailymotion.com/player/metadata/video/${videoId}`, { headers });
+        // 1. Obtener la página del iframe para capturar las cookies iniciales (bypass de 403)
+        const embedResponse = await axios.get(embedUrl, {
+            headers: {
+                'User-Agent': userAgent,
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                'Accept-Language': 'es-ES,es;q=0.9,en;q=0.8'
+            }
+        });
+
+        // Extraer cookies de la respuesta inicial
+        const rawCookies = embedResponse.headers['set-cookie'];
+        const cookies = rawCookies ? rawCookies.map(c => c.split(';')[0]).join('; ') : '';
+
+        // 2. Consultar la metadata enviando las cookies generadas
+        const metaResponse = await axios.get(`https://www.dailymotion.com/player/metadata/video/${videoId}`, {
+            headers: {
+                'User-Agent': userAgent,
+                'Accept': '*/*',
+                'Accept-Language': 'es-ES,es;q=0.9,en;q=0.8',
+                'Referer': embedUrl,
+                'Origin': 'https://www.dailymotion.com',
+                'Cookie': cookies
+            }
+        });
+
         const metadata = metaResponse.data;
 
         if (!metadata || !metadata.qualities || !metadata.qualities.auto) {
@@ -31,11 +48,18 @@ app.get('/get-dailymotion-stream', async (req, res) => {
 
         const masterM3u8Url = metadata.qualities.auto[0].url;
 
-        // 2. Solicitar el manifiesto Master M3U8
-        const playlistResponse = await axios.get(masterM3u8Url, { headers });
+        // 3. Obtener el archivo .m3u8 Master pasándole la cookie
+        const playlistResponse = await axios.get(masterM3u8Url, {
+            headers: {
+                'User-Agent': userAgent,
+                'Referer': embedUrl,
+                'Cookie': cookies
+            }
+        });
+
         const m3u8Content = playlistResponse.data;
 
-        // 3. Extraer la URL de la variante de calidad (480p, 720p, etc.)
+        // 4. Extraer el enlace sec2(...) final del archivo
         const lines = m3u8Content.split('\n');
         let finalStreamUrl = '';
 
@@ -47,13 +71,11 @@ app.get('/get-dailymotion-stream', async (req, res) => {
             }
         }
 
-        // Si es una ruta relativa, convertirla en URL absoluta
         if (finalStreamUrl && !finalStreamUrl.startsWith('http')) {
             const baseUrl = masterM3u8Url.substring(0, masterM3u8Url.lastIndexOf('/') + 1);
             finalStreamUrl = new URL(finalStreamUrl, baseUrl).href;
         }
 
-        // Si no se extrajo del texto, usar la URL master directa como respaldo
         if (!finalStreamUrl) {
             finalStreamUrl = masterM3u8Url;
         }
