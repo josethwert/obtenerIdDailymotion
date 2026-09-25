@@ -13,36 +13,52 @@ app.get('/get-dailymotion-stream', async (req, res) => {
 
     try {
         // 1. Obtener la metadata del reproductor de Dailymotion
-        const response = await axios.get(`https://www.dailymotion.com/player/metadata/video/${videoId}`, {
+        const metaResponse = await axios.get(`https://www.dailymotion.com/player/metadata/video/${videoId}`, {
             headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
             }
         });
-        
-        const metadata = response.data;
 
-        if (metadata && metadata.qualities && metadata.qualities.auto) {
-            const initialM3u8Url = metadata.qualities.auto[0].url;
+        const metadata = metaResponse.data;
 
-            // 2. Seguir las redirecciones para obtener la URL final del CDN (con el token sec2)
-            const cdnResponse = await axios.get(initialM3u8Url, {
-                maxRedirects: 5,
-                headers: {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-                }
-            });
-
-            // La URL final tras las redirecciones (ej. https://live.eu-north-1b.cf.dmcdn.net/sec2(...))
-            const finalStreamUrl = cdnResponse.request.res.responseUrl || initialM3u8Url;
-
-            return res.json({ streamUrl: finalStreamUrl });
-        } else {
+        if (!metadata || !metadata.qualities || !metadata.qualities.auto) {
             return res.status(404).json({ error: 'No se encontró transmisión HLS en vivo' });
         }
+
+        const masterM3u8Url = metadata.qualities.auto[0].url;
+
+        // 2. Descargar el contenido del archivo M3U8 Master
+        const playlistResponse = await axios.get(masterM3u8Url, {
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            }
+        });
+
+        const m3u8Content = playlistResponse.data;
+
+        // 3. Extraer la URL final con sec2(...) del playlist M3U8
+        // Buscamos líneas que empiecen por http y contengan sec2 o dmcdn
+        const lines = m3u8Content.split('\n');
+        let finalStreamUrl = '';
+
+        for (let i = 0; i < lines.length; i++) {
+            const line = lines[i].trim();
+            if (line.startsWith('http://') || line.startsWith('https://')) {
+                finalStreamUrl = line; // Tomamos la variante encontrada
+            }
+        }
+
+        // Si no se encontró dentro del cuerpo, respaldamos con la URL resuelta por redirección
+        if (!finalStreamUrl) {
+            finalStreamUrl = playlistResponse.request.res.responseUrl || masterM3u8Url;
+        }
+
+        return res.json({ streamUrl: finalStreamUrl });
+
     } catch (error) {
-        return res.status(500).json({ 
-            error: 'Error al resolver la transmisión de Dailymotion', 
-            details: error.message 
+        return res.status(500).json({
+            error: 'Error al resolver la transmisión de Dailymotion',
+            details: error.message
         });
     }
 });
