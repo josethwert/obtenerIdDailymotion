@@ -12,7 +12,6 @@ app.get('/get-dailymotion-stream', async (req, res) => {
     }
 
     try {
-        // Consultar la API GraphQL interna de Dailymotion
         const gqlQuery = {
             query: `query Video($id: String!) {
                 video(id: $id) {
@@ -32,7 +31,6 @@ app.get('/get-dailymotion-stream', async (req, res) => {
                 'Content-Type': 'application/json'
             }
         }).catch(async () => {
-            // Alternativa directa si falla el POST GraphQL
             return await axios.get(`https://www.dailymotion.com/player/metadata/video/${videoId}?app=com.dailymotion.neon`, {
                 headers: {
                     'User-Agent': 'Dailymotion/7.6.0 (Android TV; Android 9)'
@@ -53,7 +51,6 @@ app.get('/get-dailymotion-stream', async (req, res) => {
             return res.status(404).json({ error: 'No se encontró transmisión HLS' });
         }
 
-        // Descargar el contenido m3u8 enviando User-Agent de Android TV
         const playlistResponse = await axios.get(masterM3u8Url, {
             headers: {
                 'User-Agent': 'Dailymotion/7.6.0 (Android TV; Android 9)'
@@ -79,6 +76,11 @@ app.get('/get-dailymotion-stream', async (req, res) => {
 
         if (!finalStreamUrl) {
             finalStreamUrl = masterM3u8Url;
+        }
+
+        // LIMPIEZA CLAVE: Eliminar cualquier fragmento #cell=... que rompa Tizen AVPlay
+        if (finalStreamUrl.includes('#')) {
+            finalStreamUrl = finalStreamUrl.split('#')[0];
         }
 
         return res.json({ streamUrl: finalStreamUrl });
