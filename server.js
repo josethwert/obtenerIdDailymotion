@@ -12,54 +12,55 @@ app.get('/get-dailymotion-stream', async (req, res) => {
     }
 
     try {
-        const userAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36';
-        const embedUrl = `https://www.dailymotion.com/embed/video/${videoId}`;
+        // Consultar la API GraphQL interna de Dailymotion
+        const gqlQuery = {
+            query: `query Video($id: String!) {
+                video(id: $id) {
+                    qualities {
+                        auto {
+                            url
+                        }
+                    }
+                }
+            }`,
+            variables: { id: videoId }
+        };
 
-        // 1. Obtener la página del iframe para capturar las cookies iniciales (bypass de 403)
-        const embedResponse = await axios.get(embedUrl, {
+        const response = await axios.post('https://www.dailymotion.com/player/metadata/video/' + videoId, gqlQuery, {
             headers: {
-                'User-Agent': userAgent,
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-                'Accept-Language': 'es-ES,es;q=0.9,en;q=0.8'
+                'User-Agent': 'Dalvik/2.1.0 (Linux; U; Android 9; SmartTV Build/PPR1.180610.011)',
+                'Content-Type': 'application/json'
             }
+        }).catch(async () => {
+            // Alternativa directa si falla el POST GraphQL
+            return await axios.get(`https://www.dailymotion.com/player/metadata/video/${videoId}?app=com.dailymotion.neon`, {
+                headers: {
+                    'User-Agent': 'Dailymotion/7.6.0 (Android TV; Android 9)'
+                }
+            });
         });
 
-        // Extraer cookies de la respuesta inicial
-        const rawCookies = embedResponse.headers['set-cookie'];
-        const cookies = rawCookies ? rawCookies.map(c => c.split(';')[0]).join('; ') : '';
+        const data = response.data;
+        let masterM3u8Url = '';
 
-        // 2. Consultar la metadata enviando las cookies generadas
-        const metaResponse = await axios.get(`https://www.dailymotion.com/player/metadata/video/${videoId}`, {
-            headers: {
-                'User-Agent': userAgent,
-                'Accept': '*/*',
-                'Accept-Language': 'es-ES,es;q=0.9,en;q=0.8',
-                'Referer': embedUrl,
-                'Origin': 'https://www.dailymotion.com',
-                'Cookie': cookies
-            }
-        });
-
-        const metadata = metaResponse.data;
-
-        if (!metadata || !metadata.qualities || !metadata.qualities.auto) {
-            return res.status(404).json({ error: 'No se encontró transmisión HLS en vivo' });
+        if (data && data.qualities && data.qualities.auto) {
+            masterM3u8Url = data.qualities.auto[0].url;
+        } else if (data && data.data && data.data.video && data.data.video.qualities) {
+            masterM3u8Url = data.data.video.qualities.auto[0].url;
         }
 
-        const masterM3u8Url = metadata.qualities.auto[0].url;
+        if (!masterM3u8Url) {
+            return res.status(404).json({ error: 'No se encontró transmisión HLS' });
+        }
 
-        // 3. Obtener el archivo .m3u8 Master pasándole la cookie
+        // Descargar el contenido m3u8 enviando User-Agent de Android TV
         const playlistResponse = await axios.get(masterM3u8Url, {
             headers: {
-                'User-Agent': userAgent,
-                'Referer': embedUrl,
-                'Cookie': cookies
+                'User-Agent': 'Dailymotion/7.6.0 (Android TV; Android 9)'
             }
         });
 
         const m3u8Content = playlistResponse.data;
-
-        // 4. Extraer el enlace sec2(...) final del archivo
         const lines = m3u8Content.split('\n');
         let finalStreamUrl = '';
 
