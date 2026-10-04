@@ -12,51 +12,43 @@ app.get('/get-dailymotion-stream', async (req, res) => {
     }
 
     try {
-        const gqlQuery = {
-            query: `query Video($id: String!) {
-                video(id: $id) {
-                    qualities {
-                        auto {
-                            url
-                        }
-                    }
-                }
-            }`,
-            variables: { id: videoId }
+        // Headers simulando una petición limpia
+        const headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
+            'Accept': 'application/json, text/plain, */*',
+            'Referer': `https://www.dailymotion.com/embed/video/${videoId}`
         };
 
-        const response = await axios.post('https://www.dailymotion.com/player/metadata/video/' + videoId, gqlQuery, {
-            headers: {
-                'User-Agent': 'Dalvik/2.1.0 (Linux; U; Android 9; SmartTV Build/PPR1.180610.011)',
-                'Content-Type': 'application/json'
-            }
-        }).catch(async () => {
-            return await axios.get(`https://www.dailymotion.com/player/metadata/video/${videoId}?app=com.dailymotion.neon`, {
-                headers: {
-                    'User-Agent': 'Dailymotion/7.6.0 (Android TV; Android 9)'
-                }
-            });
-        });
-
-        const data = response.data;
         let masterM3u8Url = '';
 
-        if (data && data.qualities && data.qualities.auto) {
-            masterM3u8Url = data.qualities.auto[0].url;
-        } else if (data && data.data && data.data.video && data.data.video.qualities) {
-            masterM3u8Url = data.data.video.qualities.auto[0].url;
+        // Intento 1: API de metadata de reproductor
+        try {
+            const metaResponse = await axios.get(`https://www.dailymotion.com/player/metadata/video/${videoId}`, { headers });
+            if (metaResponse.data && metaResponse.data.qualities && metaResponse.data.qualities.auto) {
+                masterM3u8Url = metaResponse.data.qualities.auto[0].url;
+            }
+        } catch (e1) {
+            console.log("Intento 1 falló, probando API v2...");
+        }
+
+        // Intento 2: Fallback a API de embed interna si el intento 1 devolvió 403
+        if (!masterM3u8Url) {
+            const embedResponse = await axios.get(`https://www.dailymotion.com/embed/video/${videoId}`, { headers });
+            const html = embedResponse.data;
+            
+            // Extraer la URL m3u8 desde las variables internas del HTML
+            const match = html.match(/"type":"application\/x-mpegURL","url":"([^"]+)"/);
+            if (match && match[1]) {
+                masterM3u8Url = match[1].replace(/\\/g, '');
+            }
         }
 
         if (!masterM3u8Url) {
-            return res.status(404).json({ error: 'No se encontró transmisión HLS' });
+            return res.status(404).json({ error: 'No se pudo obtener la URL de la transmisión' });
         }
 
-        const playlistResponse = await axios.get(masterM3u8Url, {
-            headers: {
-                'User-Agent': 'Dailymotion/7.6.0 (Android TV; Android 9)'
-            }
-        });
-
+        // Descargar el manifiesto Master para extraer la variante directa (sec2)
+        const playlistResponse = await axios.get(masterM3u8Url, { headers });
         const m3u8Content = playlistResponse.data;
         const lines = m3u8Content.split('\n');
         let finalStreamUrl = '';
@@ -78,7 +70,7 @@ app.get('/get-dailymotion-stream', async (req, res) => {
             finalStreamUrl = masterM3u8Url;
         }
 
-        // LIMPIEZA CLAVE: Eliminar cualquier fragmento #cell=... que rompa Tizen AVPlay
+        // Limpiar anclas (#cell=...) para evitar fallos en AVPlay de Tizen
         if (finalStreamUrl.includes('#')) {
             finalStreamUrl = finalStreamUrl.split('#')[0];
         }
