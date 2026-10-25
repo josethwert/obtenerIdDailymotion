@@ -6,6 +6,11 @@ const cors = require('cors');
 const app = express();
 app.use(cors());
 
+// Ruta de estado para verificar que el servidor está activo
+app.get('/', (req, res) => {
+    res.json({ status: "OK", mensaje: "Servidor EIT/EPG y Proxy activo" });
+});
+
 // Endpoint para obtener el programa actual analizando los paquetes TS
 app.get('/api/epg', (req, res) => {
     const targetUrl = req.query.url;
@@ -19,8 +24,17 @@ app.get('/api/epg', (req, res) => {
 
     console.log(`[EPG] Consultando canal: ${targetUrl}`);
 
-    const streamReq = client.get(targetUrl, (stream) => {
-        // Aumentamos el timeout a 7 segundos para dar tiempo al stream
+    // Opciones con User-Agent de VLC para asegurar que el servidor IPTV envíe metadatos y EPG
+    const options = {
+        headers: {
+            'User-Agent': 'VLC/3.0.16 LibVLC/3.0.16',
+            'Accept': '*/*',
+            'Connection': 'keep-alive'
+        }
+    };
+
+    const streamReq = client.get(targetUrl, options, (stream) => {
+        // Timeout de 7 segundos para dar tiempo al stream de enviar paquetes EIT
         const timeout = setTimeout(() => {
             if (!programaEncontrado) {
                 console.log(`[EPG] Timeout alcanzado sin hallar EIT para: ${targetUrl}`);
@@ -41,10 +55,7 @@ app.get('/api/epg', (req, res) => {
                     const b2 = buffer[index + 2];
                     const pid = ((b1 & 0x1F) << 8) | b2;
 
-                    // Depuración opcional: descomenta la siguiente línea si quieres ver los PIDs en los logs de Render
-                    // console.log(`PID detectado: ${pid}`);
-
-                    if (pid === 0x0012) { // PID 18 (EIT)
+                    if (pid === 0x0012) { // PID 18 (EIT - Guía EPG)
                         console.log(`[EPG] ¡Paquete EIT (PID 18) encontrado!`);
                         const pusi = (b1 & 0x40) !== 0;
                         let payloadOffset = index + 4;
@@ -74,7 +85,7 @@ app.get('/api/epg', (req, res) => {
                 }
             }
 
-            if (buffer.length > 1000000) { // Ampliamos un poco el buffer a 1MB
+            if (buffer.length > 1000000) { // Límite de buffer a 1MB para evitar uso excesivo de memoria
                 buffer = buffer.slice(buffer.length - 376000);
             }
         });
@@ -91,10 +102,11 @@ app.get('/api/epg', (req, res) => {
         if (!res.headersSent) res.json({ programa: "Transmisión en vivo" });
     });
 });
+
 // Función auxiliar para extraer el nombre del programa del descriptor EIT
 function parseEITSection(buf, offset) {
     for (let i = offset; i < offset + 184; i++) {
-        // Tag 0x4D corresponde al Short Event Descriptor (Nombre y descripción corta del programa)
+        // Tag 0x4D corresponde al Short Event Descriptor (Nombre del programa)
         if (buf[i] === 0x4D && i + 3 < buf.length) {
             const descLength = buf[i + 1];
             if (descLength > 4 && i + 5 + descLength <= buf.length) {
