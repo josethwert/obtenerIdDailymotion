@@ -6,12 +6,10 @@ const cors = require('cors');
 const app = express();
 app.use(cors());
 
-// Ruta de estado
 app.get('/', (req, res) => {
     res.json({ status: "OK", mensaje: "Servidor EIT/EPG y Proxy activo" });
 });
 
-// Endpoint para obtener el programa actual analizando los paquetes TS
 app.get('/api/epg', (req, res) => {
     const targetUrl = req.query.url;
     if (!targetUrl) {
@@ -22,7 +20,7 @@ app.get('/api/epg', (req, res) => {
     let buffer = Buffer.alloc(0);
     let programaEncontrado = false;
 
-    console.log(`[EPG] Conectando al canal para buscar EIT: ${targetUrl}`);
+    console.log(`[EPG] Conectando y extrayendo EPG para: ${targetUrl}`);
 
     const options = {
         headers: {
@@ -33,59 +31,75 @@ app.get('/api/epg', (req, res) => {
     };
 
     const streamReq = client.get(targetUrl, options, (stream) => {
-        // Aumentamos el timeout a 18 segundos para dar tiempo a que la tabla EIT aparezca en el flujo
         const timeout = setTimeout(() => {
             if (!programaEncontrado) {
-                console.log(`[EPG] Timeout de 18s alcanzado sin hallar EIT para: ${targetUrl}`);
+                console.log(`[EPG] Timeout alcanzado.`);
                 stream.destroy();
                 res.json({ programa: "Transmisión en vivo" });
             }
-        }, 18000);
+        }, 15000);
 
         stream.on('data', (chunk) => {
             if (programaEncontrado) return;
 
             buffer = Buffer.concat([buffer, chunk]);
 
-            let index = 0;
-            while (index <= buffer.length - 188) {
-                if (buffer[index] === 0x47) { // Sincronización MPEG-TS (0x47)
-                    const b1 = buffer[index + 1];
-                    const b2 = buffer[index + 2];
-                    const pid = ((b1 & 0x1F) << 8) | b2;
+            let offset = 0;
+            while (offset + 188 <= buffer.length) {
+                if (buffer[offset] !== 0x47) {
+                    let nextSync = buffer.indexOf(0x47, offset);
+                    if (nextSync === -1) break;
+                    offset = nextSync;
+                }
 
-                    if (pid === 0x0012) { // PID 18 (EIT - Guía EPG)
-                        const pusi = (b1 & 0x40) !== 0;
-                        let payloadOffset = index + 4;
+                if (offset + 188 > buffer.length) break;
 
-                        if (pusi) {
-                            const pointerField = buffer[payloadOffset];
-                            payloadOffset += 1 + pointerField;
+                const b1 = buffer[offset + 1];
+                const b2 = buffer[offset + 2];
+                const b3 = buffer[offset + 3];
+                const pid = ((b1 & 0x1F) << 8) | b2;
+
+                if (pid === 0x0012) { // PID 18 (EIT)
+                    const pusi = (b1 & 0x40) !== 0;
+                    const adaptationFieldControl = (b3 >> 4) & 0x03;
+
+                    let headerLength = 4;
+                    if (adaptationFieldControl === 2 || adaptationFieldControl === 3) {
+                        if (offset + 4 < buffer.length) {
+                            const adaptationFieldLength = buffer[offset + 4];
+                            headerLength += 1 + adaptationFieldLength;
                         }
+                    }
 
-                        if (payloadOffset < index + 188) {
-                            const tableId = buffer[payloadOffset];
-                            if (tableId === 0x4E) { // EIT actual p/f
-                                const extractedProgram = parseEITSection(buffer, payloadOffset);
-                                if (extractedProgram) {
-                                    console.log(`[EPG] ¡ÉXITO! Programa extraído: ${extractedProgram}`);
-                                    programaEncontrado = true;
-                                    clearTimeout(timeout);
-                                    stream.destroy();
-                                    return res.json({ programa: extractedProgram });
-                                }
+                    let payloadOffset = offset + headerLength;
+
+                    if (pusi && payloadOffset < offset + 188) {
+                        const pointerField = buffer[payloadOffset];
+                        payloadOffset += 1 + pointerField;
+                    }
+
+                    if (payloadOffset < offset + 188) {
+                        const tableId = buffer[payloadOffset];
+                        if (tableId === 0x4E) { // Tabla EIT Actual/Siguiente
+                            const extractedProgram = parseEITSection(buffer, payloadOffset, offset + 188);
+                            if (extractedProgram) {
+                                console.log(`[EPG] ¡ÉXITO! Programa extraído: ${extractedProgram}`);
+                                programaEncontrado = true;
+                                clearTimeout(timeout);
+                                stream.destroy();
+                                return res.json({ programa: extractedProgram });
                             }
                         }
                     }
-                    index += 188;
-                } else {
-                    index += 1;
                 }
+
+                offset += 188;
             }
 
-            // Mantenemos un búfer más grande (hasta 2MB) para asegurar que no perdamos fragmentos de la EIT
-            if (buffer.length > 2000000) {
-                buffer = buffer.slice(buffer.length - 1000000);
+            buffer = buffer.slice(offset);
+
+            if (buffer.length > 3000000) {
+                buffer = buffer.slice(buffer.length - 1500000);
             }
         });
 
@@ -102,17 +116,20 @@ app.get('/api/epg', (req, res) => {
     });
 });
 
-// Función auxiliar para extraer el nombre del programa del descriptor EIT
-function parseEITSection(buf, offset) {
-    for (let i = offset; i < offset + 184; i++) {
-        // Tag 0x4D corresponde al Short Event Descriptor (Nombre del programa)
-        if (buf[i] === 0x4D && i + 3 < buf.length) {
-            const descLength = buf[i + 1];
-            if (descLength > 4 && i + 5 + descLength <= buf.length) {
-                const textBytes = buf.slice(i + 6, i + 2 + descLength);
-                let text = textBytes.toString('utf8').replace(/[^\x20-\x7E\u00C0-\u024F]/g, '').trim();
-                if (text.length > 2 && text.length < 50) {
-                    return text;
+// Función corregida para leer correctamente el Short Event Descriptor (Tag 0x4D)
+function parseEITSection(buf, offset, packetEnd) {
+    for (let i = offset; i < packetEnd - 5; i++) {
+        if (buf[i] === 0x4D && i + 5 < packetEnd) {
+            const descLength = buf[i + 1]; // Longitud total del descriptor
+            if (i + 2 + descLength <= packetEnd) {
+                // i+2, i+3, i+4 son el código de idioma ISO 639 (3 bytes)
+                const eventNameLength = buf[i + 5]; // Longitud del nombre del programa
+                if (i + 6 + eventNameLength <= i + 2 + descLength) {
+                    const eventNameBytes = buf.slice(i + 6, i + 6 + eventNameLength);
+                    let text = eventNameBytes.toString('utf8').replace(/[^\x20-\x7E\u00C0-\u024F]/g, '').trim();
+                    if (text.length > 1 && text.length < 60) {
+                        return text;
+                    }
                 }
             }
         }
