@@ -1,93 +1,110 @@
 const express = require('express');
-const axios = require('axios');
+const http = require('http');
+const https = require('https');
 const cors = require('cors');
 
 const app = express();
 app.use(cors());
 
-app.get('/get-dailymotion-stream', async (req, res) => {
-    const videoId = req.query.id;
-    if (!videoId) {
-        return res.status(400).json({ error: 'ID de video requerido' });
+// Endpoint para obtener el programa actual analizando los paquetes TS
+app.get('/api/epg', (req, res) => {
+    const targetUrl = req.query.url;
+    if (!targetUrl) {
+        return res.status(400).json({ error: 'URL requerida' });
     }
 
-    try {
-        // Headers simulando una petición limpia
-        const headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
-            'Accept': 'application/json, text/plain, */*',
-            'Referer': `https://www.dailymotion.com/embed/video/${videoId}`
-        };
+    const client = targetUrl.startsWith('https') ? https : http;
+    let buffer = Buffer.alloc(0);
+    let programaEncontrado = false;
 
-        let masterM3u8Url = '';
-
-        // Intento 1: API de metadata de reproductor
-        try {
-            const metaResponse = await axios.get(`https://www.dailymotion.com/player/metadata/video/${videoId}`, { headers });
-            if (metaResponse.data && metaResponse.data.qualities && metaResponse.data.qualities.auto) {
-                masterM3u8Url = metaResponse.data.qualities.auto[0].url;
+    // Abrimos una conexión temporal al stream de IPTV
+    const streamReq = client.get(targetUrl, (stream) => {
+        // Temporizador de seguridad: si en 3.5 segundos no hallamos EIT, devolvemos un texto por defecto
+        const timeout = setTimeout(() => {
+            if (!programaEncontrado) {
+                stream.destroy();
+                res.json({ programa: "Transmisión en vivo" });
             }
-        } catch (e1) {
-            console.log("Intento 1 falló, probando API v2...");
-        }
+        }, 3500);
 
-        // Intento 2: Fallback a API de embed interna si el intento 1 devolvió 403
-        if (!masterM3u8Url) {
-            const embedResponse = await axios.get(`https://www.dailymotion.com/embed/video/${videoId}`, { headers });
-            const html = embedResponse.data;
-            
-            // Extraer la URL m3u8 desde las variables internas del HTML
-            const match = html.match(/"type":"application\/x-mpegURL","url":"([^"]+)"/);
-            if (match && match[1]) {
-                masterM3u8Url = match[1].replace(/\\/g, '');
+        stream.on('data', (chunk) => {
+            if (programaEncontrado) return;
+
+            buffer = Buffer.concat([buffer, chunk]);
+
+            // Analizamos paquetes de transporte MPEG-TS (188 bytes, sincronizados con 0x47)
+            let index = 0;
+            while (index <= buffer.length - 188) {
+                if (buffer[index] === 0x47) {
+                    const b1 = buffer[index + 1];
+                    const b2 = buffer[index + 2];
+                    const pid = ((b1 & 0x1F) << 8) | b2;
+
+                    // PID 0x0012 (18 decimal) contiene la EIT (Guía de programación DVB)
+                    if (pid === 0x0012) {
+                        const pusi = (b1 & 0x40) !== 0;
+                        let payloadOffset = index + 4;
+
+                        if (pusi) {
+                            const pointerField = buffer[payloadOffset];
+                            payloadOffset += 1 + pointerField;
+                        }
+
+                        if (payloadOffset < index + 188) {
+                            const tableId = buffer[payloadOffset];
+                            if (tableId === 0x4E) { // EIT actual p/f
+                                const extractedProgram = parseEITSection(buffer, payloadOffset);
+                                if (extractedProgram) {
+                                    programaEncontrado = true;
+                                    clearTimeout(timeout);
+                                    stream.destroy();
+                                    return res.json({ programa: extractedProgram });
+                                }
+                            }
+                        }
+                    }
+                    index += 188;
+                } else {
+                    index += 1; // Sincronización de bytes TS
+                }
             }
-        }
 
-        if (!masterM3u8Url) {
-            return res.status(404).json({ error: 'No se pudo obtener la URL de la transmisión' });
-        }
-
-        // Descargar el manifiesto Master para extraer la variante directa (sec2)
-        const playlistResponse = await axios.get(masterM3u8Url, { headers });
-        const m3u8Content = playlistResponse.data;
-        const lines = m3u8Content.split('\n');
-        let finalStreamUrl = '';
-
-        for (let i = 0; i < lines.length; i++) {
-            const line = lines[i].trim();
-            if (line.includes('sec2(') || (line.startsWith('http') && !line.includes('cdndirector'))) {
-                finalStreamUrl = line;
-                break;
+            // Evitar que el buffer crezca demasiado
+            if (buffer.length > 500000) {
+                buffer = buffer.slice(buffer.length - 188000);
             }
-        }
-
-        if (finalStreamUrl && !finalStreamUrl.startsWith('http')) {
-            const baseUrl = masterM3u8Url.substring(0, masterM3u8Url.lastIndexOf('/') + 1);
-            finalStreamUrl = new URL(finalStreamUrl, baseUrl).href;
-        }
-
-        if (!finalStreamUrl) {
-            finalStreamUrl = masterM3u8Url;
-        }
-
-        // Limpiar anclas (#cell=...) para evitar fallos en AVPlay de Tizen
-        if (finalStreamUrl.includes('#')) {
-            finalStreamUrl = finalStreamUrl.split('#')[0];
-        }
-
-        return res.json({ streamUrl: finalStreamUrl });
-
-    } catch (error) {
-        return res.status(500).json({
-            error: 'Error al resolver la transmisión de Dailymotion',
-            details: error.message
         });
-    }
+
+        stream.on('error', () => {
+            clearTimeout(timeout);
+            if (!res.headersSent) res.json({ programa: "Transmisión en vivo" });
+        });
+    });
+
+    streamReq.on('error', () => {
+        if (!res.headersSent) res.json({ programa: "Transmisión en vivo" });
+    });
 });
 
-app.get('/', (req, res) => {
-    res.send('Servidor Proxy Dailymotion activo.');
-});
+// Función auxiliar para extraer el nombre del programa del descriptor EIT
+function parseEITSection(buf, offset) {
+    for (let i = offset; i < offset + 184; i++) {
+        // Tag 0x4D corresponde al Short Event Descriptor (Nombre y descripción corta del programa)
+        if (buf[i] === 0x4D && i + 3 < buf.length) {
+            const descLength = buf[i + 1];
+            if (descLength > 4 && i + 5 + descLength <= buf.length) {
+                const textBytes = buf.slice(i + 6, i + 2 + descLength);
+                let text = textBytes.toString('utf8').replace(/[^\x20-\x7E\u00C0-\u024F]/g, '').trim();
+                if (text.length > 2 && text.length < 50) {
+                    return text;
+                }
+            }
+        }
+    }
+    return null;
+}
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Servidor activo en puerto ${PORT}`));
+app.listen(PORT, () => {
+    console.log(`Servidor EIT/EPG corriendo en puerto ${PORT}`);
+});
