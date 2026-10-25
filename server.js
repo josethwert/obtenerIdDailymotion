@@ -6,7 +6,7 @@ const cors = require('cors');
 const app = express();
 app.use(cors());
 
-// Ruta de estado para verificar que el servidor está activo
+// Ruta de estado
 app.get('/', (req, res) => {
     res.json({ status: "OK", mensaje: "Servidor EIT/EPG y Proxy activo" });
 });
@@ -22,9 +22,8 @@ app.get('/api/epg', (req, res) => {
     let buffer = Buffer.alloc(0);
     let programaEncontrado = false;
 
-    console.log(`[EPG] Consultando canal: ${targetUrl}`);
+    console.log(`[EPG] Conectando al canal para buscar EIT: ${targetUrl}`);
 
-    // Opciones con User-Agent de VLC para asegurar que el servidor IPTV envíe metadatos y EPG
     const options = {
         headers: {
             'User-Agent': 'VLC/3.0.16 LibVLC/3.0.16',
@@ -34,14 +33,14 @@ app.get('/api/epg', (req, res) => {
     };
 
     const streamReq = client.get(targetUrl, options, (stream) => {
-        // Timeout de 7 segundos para dar tiempo al stream de enviar paquetes EIT
+        // Aumentamos el timeout a 18 segundos para dar tiempo a que la tabla EIT aparezca en el flujo
         const timeout = setTimeout(() => {
             if (!programaEncontrado) {
-                console.log(`[EPG] Timeout alcanzado sin hallar EIT para: ${targetUrl}`);
+                console.log(`[EPG] Timeout de 18s alcanzado sin hallar EIT para: ${targetUrl}`);
                 stream.destroy();
                 res.json({ programa: "Transmisión en vivo" });
             }
-        }, 7000);
+        }, 18000);
 
         stream.on('data', (chunk) => {
             if (programaEncontrado) return;
@@ -50,13 +49,12 @@ app.get('/api/epg', (req, res) => {
 
             let index = 0;
             while (index <= buffer.length - 188) {
-                if (buffer[index] === 0x47) {
+                if (buffer[index] === 0x47) { // Sincronización MPEG-TS (0x47)
                     const b1 = buffer[index + 1];
                     const b2 = buffer[index + 2];
                     const pid = ((b1 & 0x1F) << 8) | b2;
 
                     if (pid === 0x0012) { // PID 18 (EIT - Guía EPG)
-                        console.log(`[EPG] ¡Paquete EIT (PID 18) encontrado!`);
                         const pusi = (b1 & 0x40) !== 0;
                         let payloadOffset = index + 4;
 
@@ -67,10 +65,10 @@ app.get('/api/epg', (req, res) => {
 
                         if (payloadOffset < index + 188) {
                             const tableId = buffer[payloadOffset];
-                            if (tableId === 0x4E) {
+                            if (tableId === 0x4E) { // EIT actual p/f
                                 const extractedProgram = parseEITSection(buffer, payloadOffset);
                                 if (extractedProgram) {
-                                    console.log(`[EPG] Programa extraído con éxito: ${extractedProgram}`);
+                                    console.log(`[EPG] ¡ÉXITO! Programa extraído: ${extractedProgram}`);
                                     programaEncontrado = true;
                                     clearTimeout(timeout);
                                     stream.destroy();
@@ -85,8 +83,9 @@ app.get('/api/epg', (req, res) => {
                 }
             }
 
-            if (buffer.length > 1000000) { // Límite de buffer a 1MB para evitar uso excesivo de memoria
-                buffer = buffer.slice(buffer.length - 376000);
+            // Mantenemos un búfer más grande (hasta 2MB) para asegurar que no perdamos fragmentos de la EIT
+            if (buffer.length > 2000000) {
+                buffer = buffer.slice(buffer.length - 1000000);
             }
         });
 
