@@ -17,22 +17,23 @@ app.get('/api/epg', (req, res) => {
     let buffer = Buffer.alloc(0);
     let programaEncontrado = false;
 
-    // Abrimos una conexión temporal al stream de IPTV
+    console.log(`[EPG] Consultando canal: ${targetUrl}`);
+
     const streamReq = client.get(targetUrl, (stream) => {
-        // Temporizador de seguridad: si en 3.5 segundos no hallamos EIT, devolvemos un texto por defecto
+        // Aumentamos el timeout a 7 segundos para dar tiempo al stream
         const timeout = setTimeout(() => {
             if (!programaEncontrado) {
+                console.log(`[EPG] Timeout alcanzado sin hallar EIT para: ${targetUrl}`);
                 stream.destroy();
                 res.json({ programa: "Transmisión en vivo" });
             }
-        }, 3500);
+        }, 7000);
 
         stream.on('data', (chunk) => {
             if (programaEncontrado) return;
 
             buffer = Buffer.concat([buffer, chunk]);
 
-            // Analizamos paquetes de transporte MPEG-TS (188 bytes, sincronizados con 0x47)
             let index = 0;
             while (index <= buffer.length - 188) {
                 if (buffer[index] === 0x47) {
@@ -40,8 +41,11 @@ app.get('/api/epg', (req, res) => {
                     const b2 = buffer[index + 2];
                     const pid = ((b1 & 0x1F) << 8) | b2;
 
-                    // PID 0x0012 (18 decimal) contiene la EIT (Guía de programación DVB)
-                    if (pid === 0x0012) {
+                    // Depuración opcional: descomenta la siguiente línea si quieres ver los PIDs en los logs de Render
+                    // console.log(`PID detectado: ${pid}`);
+
+                    if (pid === 0x0012) { // PID 18 (EIT)
+                        console.log(`[EPG] ¡Paquete EIT (PID 18) encontrado!`);
                         const pusi = (b1 & 0x40) !== 0;
                         let payloadOffset = index + 4;
 
@@ -52,9 +56,10 @@ app.get('/api/epg', (req, res) => {
 
                         if (payloadOffset < index + 188) {
                             const tableId = buffer[payloadOffset];
-                            if (tableId === 0x4E) { // EIT actual p/f
+                            if (tableId === 0x4E) {
                                 const extractedProgram = parseEITSection(buffer, payloadOffset);
                                 if (extractedProgram) {
+                                    console.log(`[EPG] Programa extraído con éxito: ${extractedProgram}`);
                                     programaEncontrado = true;
                                     clearTimeout(timeout);
                                     stream.destroy();
@@ -65,27 +70,27 @@ app.get('/api/epg', (req, res) => {
                     }
                     index += 188;
                 } else {
-                    index += 1; // Sincronización de bytes TS
+                    index += 1;
                 }
             }
 
-            // Evitar que el buffer crezca demasiado
-            if (buffer.length > 500000) {
-                buffer = buffer.slice(buffer.length - 188000);
+            if (buffer.length > 1000000) { // Ampliamos un poco el buffer a 1MB
+                buffer = buffer.slice(buffer.length - 376000);
             }
         });
 
-        stream.on('error', () => {
+        stream.on('error', (err) => {
             clearTimeout(timeout);
+            console.log(`[EPG] Error en stream:`, err.message);
             if (!res.headersSent) res.json({ programa: "Transmisión en vivo" });
         });
     });
 
-    streamReq.on('error', () => {
+    streamReq.on('error', (err) => {
+        console.log(`[EPG] Error en request:`, err.message);
         if (!res.headersSent) res.json({ programa: "Transmisión en vivo" });
     });
 });
-
 // Función auxiliar para extraer el nombre del programa del descriptor EIT
 function parseEITSection(buf, offset) {
     for (let i = offset; i < offset + 184; i++) {
