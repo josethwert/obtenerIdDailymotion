@@ -122,6 +122,12 @@ function parseEITSection(buf, offset, packetEnd) {
     var sectionLength = ((buf[offset + 1] & 0x0F) << 8) | buf[offset + 2];
     var sectionEnd = offset + 3 + sectionLength - 4;
 
+    var now = new Date();
+    // Hora local actual en UTC ajustada a Nicaragua (-6 horas)
+    var currentUtcTime = new Date(now.getTime() + (6 * 60 * 60 * 1000));
+
+    var candidateEvent = null;
+
     while (pos + 12 <= sectionEnd && pos < packetEnd) {
         var mjd = (buf[pos + 2] << 8) | buf[pos + 3];
         var utc_h = buf[pos + 4];
@@ -136,6 +142,10 @@ function parseEITSection(buf, offset, packetEnd) {
         var descStart = pos + 12;
         var descEnd = descStart + descLoopLen;
 
+        var startTimeDate = mjdToDate(mjd, utc_h, utc_m, utc_s);
+        var durationSecs = bcdDurationToSeconds(dur_h, dur_m, dur_s);
+        var endTimeDate = new Date(startTimeDate.getTime() + durationSecs * 1000);
+
         for (var i = descStart; i < descEnd && i < packetEnd - 5; i++) {
             if (buf[i] === 0x4D) {
                 var descLength = buf[i + 1];
@@ -145,15 +155,23 @@ function parseEITSection(buf, offset, packetEnd) {
                         var eventNameBytes = buf.slice(i + 6, i + 6 + eventNameLength);
                         let text = eventNameBytes.toString('utf8').replace(/[^\x20-\x7E\u00C0-\u024F]/g, '').trim();
                         if (text.length > 1 && text.length < 60) {
-                            var startTimeDate = mjdToDate(mjd, utc_h, utc_m, utc_s);
-                            var durationSecs = bcdDurationToSeconds(dur_h, dur_m, dur_s);
-                            var endTimeDate = new Date(startTimeDate.getTime() + durationSecs * 1000);
-
-                            return {
+                            var eventInfo = {
                                 programa: text,
                                 inicio: formatTime(startTimeDate),
-                                fin: formatTime(endTimeDate)
+                                fin: formatTime(endTimeDate),
+                                startObj: startTimeDate,
+                                endObj: endTimeDate
                             };
+
+                            // Verificamos si el evento actual abarca el momento presente
+                            if (currentUtcTime >= startTimeDate && currentUtcTime <= endTimeDate) {
+                                return eventInfo; // ¡Encontramos el programa que está en curso exacto!
+                            }
+
+                            // Dejamos uno por defecto en caso de que el tiempo exacto no coincida por segundos
+                            if (!candidateEvent) {
+                                candidateEvent = eventInfo;
+                            }
                         }
                     }
                 }
@@ -161,7 +179,7 @@ function parseEITSection(buf, offset, packetEnd) {
         }
         pos = descEnd;
     }
-    return null;
+    return candidateEvent; // Retorna el primero disponible si no encuentra solapamiento exacto
 }
 
 // Conversión de Modified Julian Date (MJD) y BCD a Objeto Date UTC
