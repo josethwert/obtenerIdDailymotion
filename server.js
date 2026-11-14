@@ -172,6 +172,9 @@ app.get('/api/epg', (req, res) => {
     });
 });
 
+// Variable global o por instancia para acumular eventos si el stream los manda separados
+let eventosGlobales = [];
+
 function parseEITSection(buf, offset, packetEnd) {
     var pos = offset + 14;
     var sectionLength = ((buf[offset + 1] & 0x0F) << 8) | buf[offset + 2];
@@ -179,8 +182,6 @@ function parseEITSection(buf, offset, packetEnd) {
 
     var now = new Date();
     var currentLocalTime = new Date(now.getTime() - (6 * 60 * 60 * 1000));
-
-    var eventosDisponibles = [];
 
     while (pos + 12 <= sectionEnd && pos < packetEnd) {
         var mjd = (buf[pos + 2] << 8) | buf[pos + 3];
@@ -211,14 +212,21 @@ function parseEITSection(buf, offset, packetEnd) {
                     if (i + 6 + eventNameLength <= i + 2 + descLength) {
                         var eventNameBytes = buf.slice(i + 6, i + 6 + eventNameLength);
                         let text = eventNameBytes.toString('utf8').replace(/[^\x20-\x7E\u00C0-\u024F]/g, '').trim();
+                        
                         if (text.length > 1 && text.length < 60) {
-                            eventosDisponibles.push({
+                            var nuevoEvento = {
                                 programa: text,
                                 inicio: formatTime(startTimeUtc),
                                 fin: formatTime(endTimeUtc),
                                 startObj: startTimeLocal,
                                 endObj: endTimeLocal
-                            });
+                            };
+
+                            // Evitar duplicados en la lista acumulada
+                            var existe = eventosGlobales.some(e => e.programa === nuevoEvento.programa && e.inicio === nuevoEvento.inicio);
+                            if (!existe) {
+                                eventosGlobales.push(nuevoEvento);
+                            }
                         }
                     }
                 }
@@ -227,48 +235,56 @@ function parseEITSection(buf, offset, packetEnd) {
         pos = descEnd;
     }
 
-    // Ordenar cronológicamente los eventos por hora de inicio
-    eventosDisponibles.sort((a, b) => a.startObj - b.startObj);
+    // Ordenar cronológicamente todos los eventos acumulados
+    eventosGlobales.sort((a, b) => a.startObj - b.startObj);
+
+    // Limpiar eventos muy antiguos para no saturar memoria
+    eventosGlobales = eventosGlobales.filter(e => e.endObj > new Date(currentLocalTime.getTime() - (2 * 60 * 60 * 1000)));
 
     var actual = null;
     var siguiente = null;
 
-    for (var j = 0; j < eventosDisponibles.length; j++) {
-        var ev = eventosDisponibles[j];
+    // Buscar el programa actual y el siguiente en la lista ordenada
+    for (var j = 0; j < eventosGlobales.length; j++) {
+        var ev = eventosGlobales[j];
         if (currentLocalTime >= ev.startObj && currentLocalTime < ev.endObj) {
             actual = ev;
-            // El siguiente es el que está inmediatamente después en el array ordenado
-            if (j + 1 < eventosDisponibles.length) {
-                siguiente = eventosDisponibles[j + 1];
+            if (j + 1 < eventosGlobales.length) {
+                siguiente = eventosGlobales[j + 1];
             }
             break;
         }
     }
 
-    // Si no encontró el exacto por segundo, buscamos el más cercano o el primero futuro
-    if (!actual && eventosDisponibles.length > 0) {
-        for (var k = 0; k < eventosDisponibles.length; k++) {
-            if (currentLocalTime < eventosDisponibles[k].endObj) {
-                actual = eventosDisponibles[k];
-                if (k + 1 < eventosDisponibles.length) {
-                    siguiente = eventosDisponibles[k + 1];
+    // Si el tiempo actual cae entre baches, seleccionamos el más cercano en curso
+    if (!actual && eventosGlobales.length > 0) {
+        for (var k = 0; k < eventosGlobales.length; k++) {
+            if (currentLocalTime < eventosGlobales[k].endObj) {
+                actual = eventosGlobales[k];
+                if (k + 1 < eventosGlobales.length) {
+                    siguiente = eventosGlobales[k + 1];
                 }
                 break;
             }
         }
         if (!actual) {
-            actual = eventosDisponibles[0];
-            siguiente = eventosDisponibles[1] || null;
+            actual = eventosGlobales[0];
+            siguiente = eventosGlobales[1] || null;
         }
     }
 
-    return {
-        programa: actual ? actual.programa : "Transmisión en vivo",
-        inicio: actual ? actual.inicio : "",
-        fin: actual ? actual.fin : "",
-        siguientePrograma: siguiente ? siguiente.programa : "",
-        siguienteInicio: siguiente ? siguiente.inicio : ""
-    };
+    // Si ya tenemos tanto el actual como el siguiente identificados, podemos retornar de inmediato
+    if (actual && siguiente) {
+        return {
+            programa: actual.programa,
+            inicio: actual.inicio,
+            fin: actual.fin,
+            siguientePrograma: siguiente.programa,
+            siguienteInicio: siguiente.inicio
+        };
+    }
+
+    return null; // Si aún faltan datos por acumular del stream, espera al siguiente chunk
 }
 // Conversión de Modified Julian Date (MJD) y BCD a Objeto Date UTC
 function mjdToDate(mjd, hoursHex, minutesHex, secondsHex) {
