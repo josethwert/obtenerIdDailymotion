@@ -151,14 +151,23 @@ app.get('/api/epg', (req, res) => {
                             parseEITSectionLocal(buffer, payloadOffset, offset + 188, eventosCanal);
                             
                             // Intentamos evaluar si ya tenemos tanto el actual como el siguiente
-                            var evaluado = procesarEventosFinales(eventosCanal);
-                            if (evaluado && evaluado.programa !== "Transmisión en vivo" && evaluado.siguientePrograma !== "") {
-                                peticionFinalizada = true;
-                                console.log(`[EPG] ¡ÉXITO COMPLETO! Actual: ${evaluado.programa} | Próximo: ${evaluado.siguientePrograma}`);
-                                clearTimeout(timeout);
-                                stream.destroy();
-                                if (!res.headersSent) return res.json(evaluado);
-                            }
+                           var evaluado = procesarEventosFinales(eventosCanal);
+// Si ya tenemos el programa actual y el siguiente, salimos volando
+if (evaluado && evaluado.programa !== "Transmisión en vivo" && evaluado.siguientePrograma !== "") {
+    peticionFinalizada = true;
+    console.log(`[EPG] ¡ÉXITO COMPLETO! Actual: ${evaluado.programa} | Próximo: ${evaluado.siguientePrograma}`);
+    clearTimeout(timeout);
+    stream.destroy();
+    if (!res.headersSent) return res.json(evaluado);
+}
+// Si al menos ya tenemos el programa actual y han pasado más de 6 segundos desde que conectamos, respondemos para no congelar la app
+else if (evaluado && evaluado.programa !== "Transmisión en vivo" && (Date.now() - startTimeRequest > 6000)) {
+    peticionFinalizada = true;
+    console.log(`[EPG] ¡ÉXITO PARCIAL (Actual sin siguiente)! Actual: ${evaluado.programa}`);
+    clearTimeout(timeout);
+    stream.destroy();
+    if (!res.headersSent) return res.json(evaluado);
+}
                         }
                     }
                 }
