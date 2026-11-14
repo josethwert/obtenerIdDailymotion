@@ -6,6 +6,31 @@ const cors = require('cors');
 const app = express();
 app.use(cors());
 
+const https = require('https');
+
+// Endpoint proxy para transmitir canales protegidos con cabeceras
+app.get('/api/stream', (req, res) => {
+    const targetUrl = req.query.url;
+    if (!targetUrl) {
+        return res.status(400).send("Falta la URL del stream");
+    }
+
+    const options = {
+        headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+            'Referer': 'https://www.vivamediosni.com/',
+            'Origin': 'https://www.vivamediosni.com'
+        }
+    };
+
+    https.get(targetUrl, options, (proxyRes) => {
+        res.writeHead(proxyRes.statusCode, proxyRes.headers);
+        proxyRes.pipe(res);
+    }).on('error', (err) => {
+        res.status(500).send("Error en el proxy de video: " + err.message);
+    });
+});
+
 app.get('/', (req, res) => {
     res.json({ status: "OK", mensaje: "Servidor EIT/EPG y Proxy activo" });
 });
