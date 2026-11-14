@@ -69,10 +69,16 @@ app.get('/', (req, res) => {
 // 3. ENDPOINT EPG (Extracción EIT con acumulación y búfer aislado)
 // ======================================================
 app.get('/api/epg', (req, res) => {
+    // Evitar que el navegador o clientes guarden en caché la respuesta
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+
     const targetUrl = req.query.url;
     if (!targetUrl) {
         return res.status(400).json({ error: 'URL requerida' });
     }
+    // ... (el resto de tu código sigue igual)
 
     const client = targetUrl.startsWith('https') ? https : http;
     let buffer = Buffer.alloc(0);
