@@ -15,11 +15,22 @@ app.get('/api/stream', (req, res) => {
 
     const options = {
         headers: {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
-            'Referer': 'https://www.vivamediosni.com/',
-            'Origin': 'https://www.vivamediosni.com'
+            'User-Agent': 'VLC/3.0.16 LibVLC/3.0.16',
+            'Accept': '*/*'
+            // Quitamos 'Connection': 'close' para permitir que el flujo baje con estabilidad
         }
     };
+
+    const streamReq = client.get(targetUrl, options, (stream) => {
+        // Subimos el timeout a 12 segundos para asegurar la captura del siguiente programa
+        const timeout = setTimeout(() => {
+            if (!programaEncontrado) {
+                console.log(`[EPG] Timeout alcanzado para: ${targetUrl}`);
+                stream.destroy();
+                var resultado = procesarEventosFinales(eventosCanal);
+                if (!res.headersSent) res.json(resultado);
+            }
+        }, 12000); // 12 segundos de margen
 
     https.get(targetUrl, options, (proxyRes) => {
         // Si es el archivo de lista .m3u8, debemos procesarlo y reescribir sus rutas internas
@@ -143,8 +154,8 @@ app.get('/api/epg', (req, res) => {
                         if (tableId === 0x4E) { // Tabla EIT
                             parseEITSectionLocal(buffer, payloadOffset, offset + 188, eventosCanal);
                             
-                            // Si ya logramos acumular el actual y el siguiente, finalizamos de una vez
                             var evaluado = procesarEventosFinales(eventosCanal);
+                            // Si ya tenemos el programa actual y el siguiente, respondemos de inmediato sin esperar el timeout
                             if (evaluado && evaluado.programa !== "Transmisión en vivo" && evaluado.siguientePrograma !== "") {
                                 console.log(`[EPG] ¡ÉXITO COMPLETO! Actual: ${evaluado.programa} | Próximo: ${evaluado.siguientePrograma}`);
                                 programaEncontrado = true;
