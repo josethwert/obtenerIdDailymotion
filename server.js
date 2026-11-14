@@ -75,6 +75,7 @@ app.get('/api/epg', (req, res) => {
     const client = targetUrl.startsWith('https') ? https : http;
     let buffer = Buffer.alloc(0);
     let programaEncontrado = false;
+    let eventosCanal = []; // Array local y aislado para este canal en específico
 
     console.log(`[EPG] Conectando y extrayendo EPG con Horarios para: ${targetUrl}`);
 
@@ -82,18 +83,21 @@ app.get('/api/epg', (req, res) => {
         headers: {
             'User-Agent': 'VLC/3.0.16 LibVLC/3.0.16',
             'Accept': '*/*',
-            'Connection': 'keep-alive'
+            'Connection': 'close' // Forzar cierre para evitar sockets colgados
         }
     };
 
     const streamReq = client.get(targetUrl, options, (stream) => {
+        // Timeout de seguridad de 8 segundos para no dejar la petición colgada
         const timeout = setTimeout(() => {
             if (!programaEncontrado) {
-                console.log(`[EPG] Timeout alcanzado.`);
+                console.log(`[EPG] Timeout alcanzado para: ${targetUrl}`);
                 stream.destroy();
-                res.json({ programa: "Transmisión en vivo", inicio: "", fin: "" });
+                // Devolver lo que haya recolectado o un valor por defecto
+                var resultado = procesarEventosFinales(eventosCanal);
+                if (!res.headersSent) res.json(resultado);
             }
-        }, 15000);
+        }, 8000);
 
         stream.on('data', (chunk) => {
             if (programaEncontrado) return;
@@ -136,14 +140,17 @@ app.get('/api/epg', (req, res) => {
 
                     if (payloadOffset < offset + 188) {
                         const tableId = buffer[payloadOffset];
-                        if (tableId === 0x4E) { // Tabla EIT Actual/Siguiente
-                            const extracted = parseEITSection(buffer, payloadOffset, offset + 188);
-                            if (extracted && extracted.programa) {
-                                console.log(`[EPG] ¡ÉXITO! Programa: ${extracted.programa} (${extracted.inicio} - ${extracted.fin})`);
+                        if (tableId === 0x4E) { // Tabla EIT
+                            parseEITSectionLocal(buffer, payloadOffset, offset + 188, eventosCanal);
+                            
+                            // Si ya logramos acumular el actual y el siguiente, finalizamos de una vez
+                            var evaluado = procesarEventosFinales(eventosCanal);
+                            if (evaluado && evaluado.programa !== "Transmisión en vivo" && evaluado.siguientePrograma !== "") {
+                                console.log(`[EPG] ¡ÉXITO COMPLETO! Actual: ${evaluado.programa} | Próximo: ${evaluado.siguientePrograma}`);
                                 programaEncontrado = true;
                                 clearTimeout(timeout);
                                 stream.destroy();
-                                return res.json(extracted);
+                                if (!res.headersSent) return res.json(evaluado);
                             }
                         }
                     }
@@ -162,15 +169,119 @@ app.get('/api/epg', (req, res) => {
         stream.on('error', (err) => {
             clearTimeout(timeout);
             console.log(`[EPG] Error en stream:`, err.message);
-            if (!res.headersSent) res.json({ programa: "Transmisión en vivo", inicio: "", fin: "" });
+            if (!res.headersSent) res.json(procesarEventosFinales(eventosCanal));
         });
     });
 
     streamReq.on('error', (err) => {
         console.log(`[EPG] Error en request:`, err.message);
-        if (!res.headersSent) res.json({ programa: "Transmisión en vivo", inicio: "", fin: "" });
+        if (!res.headersSent) res.json({ programa: "Transmisión en vivo", inicio: "", fin: "", siguientePrograma: "", siguienteInicio: "" });
     });
 });
+
+// Función auxiliar para parsear y volcar en el array local del canal
+function parseEITSectionLocal(buf, offset, packetEnd, eventosArray) {
+    var pos = offset + 14;
+    var sectionLength = ((buf[offset + 1] & 0x0F) << 8) | buf[offset + 2];
+    var sectionEnd = offset + 3 + sectionLength - 4;
+
+    while (pos + 12 <= sectionEnd && pos < packetEnd) {
+        var mjd = (buf[pos + 2] << 8) | buf[pos + 3];
+        var utc_h = buf[pos + 4];
+        var utc_m = buf[pos + 5];
+        var utc_s = buf[pos + 6];
+        
+        var dur_h = buf[pos + 7];
+        var dur_m = buf[pos + 8];
+        var dur_s = buf[pos + 9];
+
+        var descLoopLen = (((buf[pos + 10] & 0x0F) << 8) | buf[pos + 11]);
+        var descStart = pos + 12;
+        var descEnd = descStart + descLoopLen;
+
+        var startTimeUtc = mjdToDate(mjd, utc_h, utc_m, utc_s);
+        var durationSecs = bcdDurationToSeconds(dur_h, dur_m, dur_s);
+        var endTimeUtc = new Date(startTimeUtc.getTime() + durationSecs * 1000);
+
+        var startTimeLocal = new Date(startTimeUtc.getTime() - (6 * 60 * 60 * 1000));
+        var endTimeLocal = new Date(endTimeUtc.getTime() - (6 * 60 * 60 * 1000));
+
+        for (var i = descStart; i < descEnd && i < packetEnd - 5; i++) {
+            if (buf[i] === 0x4D) {
+                var descLength = buf[i + 1];
+                if (i + 2 + descLength <= packetEnd && i + 2 + descLength <= descEnd) {
+                    var eventNameLength = buf[i + 5];
+                    if (i + 6 + eventNameLength <= i + 2 + descLength) {
+                        var eventNameBytes = buf.slice(i + 6, i + 6 + eventNameLength);
+                        let text = eventNameBytes.toString('utf8').replace(/[^\x20-\x7E\u00C0-\u024F]/g, '').trim();
+                        
+                        if (text.length > 1 && text.length < 60) {
+                            var nuevoEvento = {
+                                programa: text,
+                                inicio: formatTime(startTimeUtc),
+                                fin: formatTime(endTimeUtc),
+                                startObj: startTimeLocal,
+                                endObj: endTimeLocal
+                            };
+
+                            var existe = eventosArray.some(e => e.programa === nuevoEvento.programa && e.inicio === nuevoEvento.inicio);
+                            if (!existe) {
+                                eventosArray.push(nuevoEvento);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        pos = descEnd;
+    }
+}
+
+// Función para procesar y emparejar actual y siguiente de forma limpia
+function procesarEventosFinales(eventosArray) {
+    var now = new Date();
+    var currentLocalTime = new Date(now.getTime() - (6 * 60 * 60 * 1000));
+
+    eventosArray.sort((a, b) => a.startObj - b.startObj);
+
+    var actual = null;
+    var siguiente = null;
+
+    for (var j = 0; j < eventosArray.length; j++) {
+        var ev = eventosArray[j];
+        if (currentLocalTime >= ev.startObj && currentLocalTime < ev.endObj) {
+            actual = ev;
+            if (j + 1 < eventosArray.length) {
+                siguiente = eventosArray[j + 1];
+            }
+            break;
+        }
+    }
+
+    if (!actual && eventosArray.length > 0) {
+        for (var k = 0; k < eventosArray.length; k++) {
+            if (currentLocalTime < eventosArray[k].endObj) {
+                actual = eventosArray[k];
+                if (k + 1 < eventosArray.length) {
+                    siguiente = eventosArray[k + 1];
+                }
+                break;
+            }
+        }
+        if (!actual) {
+            actual = eventosArray[0];
+            siguiente = eventosArray[1] || null;
+        }
+    }
+
+    return {
+        programa: actual ? actual.programa : "Transmisión en vivo",
+        inicio: actual ? actual.inicio : "",
+        fin: actual ? actual.fin : "",
+        siguientePrograma: siguiente ? siguiente.programa : "",
+        siguienteInicio: siguiente ? siguiente.inicio : ""
+    };
+}
 
 // Variable global o por instancia para acumular eventos si el stream los manda separados
 let eventosGlobales = [];
