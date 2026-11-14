@@ -66,7 +66,7 @@ app.get('/', (req, res) => {
 });
 
 // ======================================================
-// 3. ENDPOINT EPG (Extracción EIT con búfer aislado)
+// 3. ENDPOINT EPG (Extracción EIT con acumulación y búfer aislado)
 // ======================================================
 app.get('/api/epg', (req, res) => {
     const targetUrl = req.query.url;
@@ -76,7 +76,7 @@ app.get('/api/epg', (req, res) => {
 
     const client = targetUrl.startsWith('https') ? https : http;
     let buffer = Buffer.alloc(0);
-    let programaEncontrado = false;
+    let peticionFinalizada = false;
     let eventosCanal = []; // Array local y aislado para este canal en específico
 
     console.log(`[EPG] Conectando y extrayendo EPG con Horarios para: ${targetUrl}`);
@@ -89,18 +89,19 @@ app.get('/api/epg', (req, res) => {
     };
 
     const streamReq = client.get(targetUrl, options, (stream) => {
-        // Timeout de seguridad ajustado a 15 segundos
+        // Timeout de seguridad de 15 segundos
         const timeout = setTimeout(() => {
-            if (!programaEncontrado) {
+            if (!peticionFinalizada) {
+                peticionFinalizada = true;
                 console.log(`[EPG] Timeout de 15s alcanzado para: ${targetUrl}`);
                 stream.destroy();
                 var resultado = procesarEventosFinales(eventosCanal);
                 if (!res.headersSent) res.json(resultado);
             }
-        }, 30000);
+        }, 15000);
 
         stream.on('data', (chunk) => {
-            if (programaEncontrado) return;
+            if (peticionFinalizada) return;
 
             buffer = Buffer.concat([buffer, chunk]);
 
@@ -140,13 +141,14 @@ app.get('/api/epg', (req, res) => {
 
                     if (payloadOffset < offset + 188) {
                         const tableId = buffer[payloadOffset];
-                        if (tableId === 0x4E) { // Tabla EIT
+                        if (tableId === 0x4E) { // Tabla EIT Actual/Siguiente
                             parseEITSectionLocal(buffer, payloadOffset, offset + 188, eventosCanal);
                             
+                            // Intentamos evaluar si ya tenemos tanto el actual como el siguiente
                             var evaluado = procesarEventosFinales(eventosCanal);
                             if (evaluado && evaluado.programa !== "Transmisión en vivo" && evaluado.siguientePrograma !== "") {
+                                peticionFinalizada = true;
                                 console.log(`[EPG] ¡ÉXITO COMPLETO! Actual: ${evaluado.programa} | Próximo: ${evaluado.siguientePrograma}`);
-                                programaEncontrado = true;
                                 clearTimeout(timeout);
                                 stream.destroy();
                                 if (!res.headersSent) return res.json(evaluado);
@@ -166,6 +168,8 @@ app.get('/api/epg', (req, res) => {
         });
 
         stream.on('error', (err) => {
+            if (peticionFinalizada) return;
+            peticionFinalizada = true;
             clearTimeout(timeout);
             console.log(`[EPG] Error en stream:`, err.message);
             if (!res.headersSent) res.json(procesarEventosFinales(eventosCanal));
@@ -173,6 +177,8 @@ app.get('/api/epg', (req, res) => {
     });
 
     streamReq.on('error', (err) => {
+        if (peticionFinalizada) return;
+        peticionFinalizada = true;
         console.log(`[EPG] Error en request:`, err.message);
         if (!res.headersSent) res.json({ programa: "Transmisión en vivo", inicio: "", fin: "", siguientePrograma: "", siguienteInicio: "" });
     });
