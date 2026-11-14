@@ -69,7 +69,7 @@ app.get('/', (req, res) => {
 // 3. ENDPOINT EPG (Extracción EIT con acumulación y búfer aislado)
 // ======================================================
 app.get('/api/epg', (req, res) => {
-    // Evitar que el navegador o clientes guarden en caché la respuesta
+    // Evitar caché del navegador o cliente
     res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
     res.setHeader('Pragma', 'no-cache');
     res.setHeader('Expires', '0');
@@ -78,12 +78,12 @@ app.get('/api/epg', (req, res) => {
     if (!targetUrl) {
         return res.status(400).json({ error: 'URL requerida' });
     }
-    // ... (el resto de tu código sigue igual)
 
     const client = targetUrl.startsWith('https') ? https : http;
     let buffer = Buffer.alloc(0);
     let peticionFinalizada = false;
-    let eventosCanal = []; // Array local y aislado para este canal en específico
+    let eventosCanal = []; 
+    const startTimeRequest = Date.now(); // Declaración correcta de la variable de tiempo
 
     console.log(`[EPG] Conectando y extrayendo EPG con Horarios para: ${targetUrl}`);
 
@@ -95,11 +95,11 @@ app.get('/api/epg', (req, res) => {
     };
 
     const streamReq = client.get(targetUrl, options, (stream) => {
-        // Timeout de seguridad de 15 segundos
+        // Timeout de seguridad de 20 segundos
         const timeout = setTimeout(() => {
             if (!peticionFinalizada) {
                 peticionFinalizada = true;
-                console.log(`[EPG] Timeout de 15s alcanzado para: ${targetUrl}`);
+                console.log(`[EPG] Timeout de 20s alcanzado para: ${targetUrl}`);
                 stream.destroy();
                 var resultado = procesarEventosFinales(eventosCanal);
                 if (!res.headersSent) res.json(resultado);
@@ -150,24 +150,24 @@ app.get('/api/epg', (req, res) => {
                         if (tableId === 0x4E) { // Tabla EIT Actual/Siguiente
                             parseEITSectionLocal(buffer, payloadOffset, offset + 188, eventosCanal);
                             
-                            // Intentamos evaluar si ya tenemos tanto el actual como el siguiente
-                           var evaluado = procesarEventosFinales(eventosCanal);
-// Si ya tenemos el programa actual y el siguiente, salimos volando
-if (evaluado && evaluado.programa !== "Transmisión en vivo" && evaluado.siguientePrograma !== "") {
-    peticionFinalizada = true;
-    console.log(`[EPG] ¡ÉXITO COMPLETO! Actual: ${evaluado.programa} | Próximo: ${evaluado.siguientePrograma}`);
-    clearTimeout(timeout);
-    stream.destroy();
-    if (!res.headersSent) return res.json(evaluado);
-}
-// Si al menos ya tenemos el programa actual y han pasado más de 6 segundos desde que conectamos, respondemos para no congelar la app
-else if (evaluado && evaluado.programa !== "Transmisión en vivo" && (Date.now() - startTimeRequest > 6000)) {
-    peticionFinalizada = true;
-    console.log(`[EPG] ¡ÉXITO PARCIAL (Actual sin siguiente)! Actual: ${evaluado.programa}`);
-    clearTimeout(timeout);
-    stream.destroy();
-    if (!res.headersSent) return res.json(evaluado);
-}
+                            var evaluado = procesarEventosFinales(eventosCanal);
+                            
+                            // Si ya tenemos el programa actual y el siguiente, salimos de inmediato
+                            if (evaluado && evaluado.programa !== "Transmisión en vivo" && evaluado.siguientePrograma !== "") {
+                                peticionFinalizada = true;
+                                console.log(`[EPG] ¡ÉXITO COMPLETO! Actual: ${evaluado.programa} | Próximo: ${evaluado.siguientePrograma}`);
+                                clearTimeout(timeout);
+                                stream.destroy();
+                                if (!res.headersSent) return res.json(evaluado);
+                            }
+                            // Si ya tenemos el programa actual y han pasado más de 6 segundos, respondemos para no congelar
+                            else if (evaluado && evaluado.programa !== "Transmisión en vivo" && (Date.now() - startTimeRequest > 6000)) {
+                                peticionFinalizada = true;
+                                console.log(`[EPG] ¡ÉXITO PARCIAL (Actual sin siguiente)! Actual: ${evaluado.programa}`);
+                                clearTimeout(timeout);
+                                stream.destroy();
+                                if (!res.headersSent) return res.json(evaluado);
+                            }
                         }
                     }
                 }
