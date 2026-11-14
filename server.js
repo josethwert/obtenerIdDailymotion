@@ -77,7 +77,7 @@ app.get('/api/epg', (req, res) => {
     const client = targetUrl.startsWith('https') ? https : http;
     let buffer = Buffer.alloc(0);
     let programaEncontrado = false;
-    let eventosCanal = []; // Array local y aislado para este canal en específico
+    let eventosCanal = []; // Array local y aislado por consulta
 
     console.log(`[EPG] Conectando y extrayendo EPG con Horarios para: ${targetUrl}`);
 
@@ -89,15 +89,15 @@ app.get('/api/epg', (req, res) => {
     };
 
     const streamReq = client.get(targetUrl, options, (stream) => {
-        // Timeout de seguridad de 12 segundos para asegurar la captura del siguiente programa
+        // Timeout optimizado de 6 segundos para evitar saturación de conexiones en cola
         const timeout = setTimeout(() => {
             if (!programaEncontrado) {
-                console.log(`[EPG] Timeout alcanzado para: ${targetUrl}`);
+                console.log(`[EPG] Timeout de 6s alcanzado para: ${targetUrl}`);
                 stream.destroy();
                 var resultado = procesarEventosFinales(eventosCanal);
                 if (!res.headersSent) res.json(resultado);
             }
-        }, 12000);
+        }, 6000);
 
         stream.on('data', (chunk) => {
             if (programaEncontrado) return;
@@ -140,7 +140,7 @@ app.get('/api/epg', (req, res) => {
 
                     if (payloadOffset < offset + 188) {
                         const tableId = buffer[payloadOffset];
-                        if (tableId === 0x4E) { // Tabla EIT
+                        if (tableId === 0x4E) { // Tabla EIT Actual/Siguiente
                             parseEITSectionLocal(buffer, payloadOffset, offset + 188, eventosCanal);
                             
                             var evaluado = procesarEventosFinales(eventosCanal);
@@ -174,7 +174,15 @@ app.get('/api/epg', (req, res) => {
 
     streamReq.on('error', (err) => {
         console.log(`[EPG] Error en request:`, err.message);
-        if (!res.headersSent) res.json({ programa: "Transmisión en vivo", inicio: "", fin: "", siguientePrograma: "", siguienteInicio: "" });
+        if (!res.headersSent) {
+            res.json({
+                programa: "Transmisión en vivo",
+                inicio: "",
+                fin: "",
+                siguientePrograma: "",
+                siguienteInicio: ""
+            });
+        }
     });
 });
 
@@ -251,8 +259,12 @@ function procesarEventosFinales(eventosArray) {
         var ev = eventosArray[j];
         if (currentLocalTime >= ev.startObj && currentLocalTime < ev.endObj) {
             actual = ev;
-            if (j + 1 < eventosArray.length) {
-                siguiente = eventosArray[j + 1];
+            // Buscar el siguiente que tenga un nombre DISTINTO al actual
+            for (var n = j + 1; n < eventosArray.length; n++) {
+                if (eventosArray[n].programa !== actual.programa) {
+                    siguiente = eventosArray[n];
+                    break;
+                }
             }
             break;
         }
@@ -262,15 +274,18 @@ function procesarEventosFinales(eventosArray) {
         for (var k = 0; k < eventosArray.length; k++) {
             if (currentLocalTime < eventosArray[k].endObj) {
                 actual = eventosArray[k];
-                if (k + 1 < eventosArray.length) {
-                    siguiente = eventosArray[k + 1];
+                for (var m = k + 1; m < eventosArray.length; m++) {
+                    if (eventosArray[m].programa !== actual.programa) {
+                        siguiente = eventosArray[m];
+                        break;
+                    }
                 }
                 break;
             }
         }
         if (!actual) {
             actual = eventosArray[0];
-            siguiente = eventosArray[1] || null;
+            siguiente = eventosArray[1] && eventosArray[1].programa !== actual.programa ? eventosArray[1] : null;
         }
     }
 
