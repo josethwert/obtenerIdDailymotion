@@ -172,14 +172,12 @@ app.get('/api/epg', (req, res) => {
     });
 });
 
-// Función mejorada para filtrar estrictamente el programa actual en curso
 function parseEITSection(buf, offset, packetEnd) {
     var pos = offset + 14;
     var sectionLength = ((buf[offset + 1] & 0x0F) << 8) | buf[offset + 2];
     var sectionEnd = offset + 3 + sectionLength - 4;
 
     var now = new Date();
-    // Hora actual exacta ajustada a la zona horaria local de Nicaragua (UTC-6)
     var currentLocalTime = new Date(now.getTime() - (6 * 60 * 60 * 1000));
 
     var eventosDisponibles = [];
@@ -202,7 +200,6 @@ function parseEITSection(buf, offset, packetEnd) {
         var durationSecs = bcdDurationToSeconds(dur_h, dur_m, dur_s);
         var endTimeUtc = new Date(startTimeUtc.getTime() + durationSecs * 1000);
 
-        // Convertir tiempos UTC del stream a hora local de Nicaragua (UTC-6) para comparar bien
         var startTimeLocal = new Date(startTimeUtc.getTime() - (6 * 60 * 60 * 1000));
         var endTimeLocal = new Date(endTimeUtc.getTime() - (6 * 60 * 60 * 1000));
 
@@ -215,21 +212,13 @@ function parseEITSection(buf, offset, packetEnd) {
                         var eventNameBytes = buf.slice(i + 6, i + 6 + eventNameLength);
                         let text = eventNameBytes.toString('utf8').replace(/[^\x20-\x7E\u00C0-\u024F]/g, '').trim();
                         if (text.length > 1 && text.length < 60) {
-                            var eventInfo = {
+                            eventosDisponibles.push({
                                 programa: text,
-                                inicio: formatTime(startTimeUtc), // Mantiene tu formato visual
+                                inicio: formatTime(startTimeUtc),
                                 fin: formatTime(endTimeUtc),
                                 startObj: startTimeLocal,
                                 endObj: endTimeLocal
-                            };
-
-                            eventosDisponibles.push(eventInfo);
-
-                            // Búsqueda estricta: ¿La hora local actual está entre el inicio y el fin de este programa?
-                            if (currentLocalTime >= startTimeLocal && currentLocalTime < endTimeLocal) {
-                                console.log(`[EPG ENCONTRADO] Activo: ${text} (${eventInfo.inicio} - ${eventInfo.fin})`);
-                                return eventInfo; 
-                            }
+                            });
                         }
                     }
                 }
@@ -238,21 +227,49 @@ function parseEITSection(buf, offset, packetEnd) {
         pos = descEnd;
     }
 
-    // Si por segundos exactos no hace match perfecto, ordenamos y devolvemos el que esté más cercano o en curso
-    if (eventosDisponibles.length > 0) {
-        // Buscar el que tenga la hora de inicio más cercana anterior o igual a la actual
-        for (var e = 0; e < eventosDisponibles.length; e++) {
-            if (currentLocalTime >= eventosDisponibles[e].startObj) {
-                return eventosDisponibles[e];
+    // Ordenar cronológicamente los eventos por hora de inicio
+    eventosDisponibles.sort((a, b) => a.startObj - b.startObj);
+
+    var actual = null;
+    var siguiente = null;
+
+    for (var j = 0; j < eventosDisponibles.length; j++) {
+        var ev = eventosDisponibles[j];
+        if (currentLocalTime >= ev.startObj && currentLocalTime < ev.endObj) {
+            actual = ev;
+            // El siguiente es el que está inmediatamente después en el array ordenado
+            if (j + 1 < eventosDisponibles.length) {
+                siguiente = eventosDisponibles[j + 1];
             }
+            break;
         }
-        // Si todos son futuros, devolvemos el primero de la lista de la parrilla
-        return eventosDisponibles[0];
     }
 
-    return null;
-}
+    // Si no encontró el exacto por segundo, buscamos el más cercano o el primero futuro
+    if (!actual && eventosDisponibles.length > 0) {
+        for (var k = 0; k < eventosDisponibles.length; k++) {
+            if (currentLocalTime < eventosDisponibles[k].endObj) {
+                actual = eventosDisponibles[k];
+                if (k + 1 < eventosDisponibles.length) {
+                    siguiente = eventosDisponibles[k + 1];
+                }
+                break;
+            }
+        }
+        if (!actual) {
+            actual = eventosDisponibles[0];
+            siguiente = eventosDisponibles[1] || null;
+        }
+    }
 
+    return {
+        programa: actual ? actual.programa : "Transmisión en vivo",
+        inicio: actual ? actual.inicio : "",
+        fin: actual ? actual.fin : "",
+        siguientePrograma: siguiente ? siguiente.programa : "",
+        siguienteInicio: siguiente ? siguiente.inicio : ""
+    };
+}
 // Conversión de Modified Julian Date (MJD) y BCD a Objeto Date UTC
 function mjdToDate(mjd, hoursHex, minutesHex, secondsHex) {
     var jd = mjd + 2400001.5;
