@@ -104,7 +104,7 @@ app.get('/api/epg', (req, res) => {
                 var resultado = procesarEventosFinales(eventosCanal);
                 if (!res.headersSent) res.json(resultado);
             }
-        }, 20000);
+        }, 25000);
 
         stream.on('data', (chunk) => {
             if (peticionFinalizada) return;
