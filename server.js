@@ -77,7 +77,7 @@ app.get('/api/epg', (req, res) => {
     const client = targetUrl.startsWith('https') ? https : http;
     let buffer = Buffer.alloc(0);
     let programaEncontrado = false;
-    let eventosCanal = []; // Array local y aislado por consulta
+    let eventosCanal = []; // Array local y aislado para este canal en específico
 
     console.log(`[EPG] Conectando y extrayendo EPG con Horarios para: ${targetUrl}`);
 
@@ -89,15 +89,15 @@ app.get('/api/epg', (req, res) => {
     };
 
     const streamReq = client.get(targetUrl, options, (stream) => {
-        // Timeout optimizado de 6 segundos para evitar saturación de conexiones en cola
+        // Timeout de seguridad ajustado a 15 segundos
         const timeout = setTimeout(() => {
             if (!programaEncontrado) {
-                console.log(`[EPG] Timeout de 6s alcanzado para: ${targetUrl}`);
+                console.log(`[EPG] Timeout de 15s alcanzado para: ${targetUrl}`);
                 stream.destroy();
                 var resultado = procesarEventosFinales(eventosCanal);
                 if (!res.headersSent) res.json(resultado);
             }
-        }, 6000);
+        }, 15000);
 
         stream.on('data', (chunk) => {
             if (programaEncontrado) return;
@@ -140,7 +140,7 @@ app.get('/api/epg', (req, res) => {
 
                     if (payloadOffset < offset + 188) {
                         const tableId = buffer[payloadOffset];
-                        if (tableId === 0x4E) { // Tabla EIT Actual/Siguiente
+                        if (tableId === 0x4E) { // Tabla EIT
                             parseEITSectionLocal(buffer, payloadOffset, offset + 188, eventosCanal);
                             
                             var evaluado = procesarEventosFinales(eventosCanal);
@@ -174,15 +174,7 @@ app.get('/api/epg', (req, res) => {
 
     streamReq.on('error', (err) => {
         console.log(`[EPG] Error en request:`, err.message);
-        if (!res.headersSent) {
-            res.json({
-                programa: "Transmisión en vivo",
-                inicio: "",
-                fin: "",
-                siguientePrograma: "",
-                siguienteInicio: ""
-            });
-        }
+        if (!res.headersSent) res.json({ programa: "Transmisión en vivo", inicio: "", fin: "", siguientePrograma: "", siguienteInicio: "" });
     });
 });
 
@@ -259,7 +251,6 @@ function procesarEventosFinales(eventosArray) {
         var ev = eventosArray[j];
         if (currentLocalTime >= ev.startObj && currentLocalTime < ev.endObj) {
             actual = ev;
-            // Buscar el siguiente que tenga un nombre DISTINTO al actual
             for (var n = j + 1; n < eventosArray.length; n++) {
                 if (eventosArray[n].programa !== actual.programa) {
                     siguiente = eventosArray[n];
