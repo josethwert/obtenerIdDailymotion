@@ -6,7 +6,7 @@ const cors = require('cors');
 const app = express();
 app.use(cors());
 
-// Endpoint proxy para transmitir canales protegidos con cabeceras
+// Endpoint proxy avanzado para .m3u8 y sus fragmentos
 app.get('/api/stream', (req, res) => {
     const targetUrl = req.query.url;
     if (!targetUrl) {
@@ -22,13 +22,46 @@ app.get('/api/stream', (req, res) => {
     };
 
     https.get(targetUrl, options, (proxyRes) => {
-        res.writeHead(proxyRes.statusCode, proxyRes.headers);
-        proxyRes.pipe(res);
+        // Si es el archivo de lista .m3u8, debemos procesarlo y reescribir sus rutas internas
+        const contentType = proxyRes.headers['content-type'] || '';
+        if (targetUrl.includes('.m3u8') || contentType.includes('application') || contentType.includes('text')) {
+            let data = '';
+            proxyRes.on('data', (chunk) => { data += chunk; });
+            proxyRes.on('end', () => {
+                const baseUrl = targetUrl.substring(0, targetUrl.lastIndexOf('/') + 1);
+                
+                // Reescribir cada línea del m3u8 para que los segmentos pasen también por el proxy
+                const lines = data.split('\n');
+                const rewrittenLines = lines.map(line => {
+                    const trimmed = line.trim();
+                    if (!trimmed || trimmed.startsWith('#')) {
+                        return line; // Mantener etiquetas y comentarios intactos
+                    }
+                    
+                    // Resolver URLs relativas o absolutas de los fragmentos/sub-playlists
+                    let absoluteUrl = trimmed;
+                    if (!trimmed.startsWith('http')) {
+                        absoluteUrl = new URL(trimmed, baseUrl).href;
+                    }
+                    
+                    // Enrutar el segmento a través de nuestro proxy
+                    return `https://${req.get('host')}/api/stream?url=${encodeURIComponent(absoluteUrl)}`;
+                });
+
+                res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
+                res.send(rewrittenLines.join('\n'));
+            });
+        } else {
+            // Si es un segmento de video directo (.ts o .aac), se hace pipe normal
+            res.writeHead(proxyRes.statusCode, proxyRes.headers);
+            proxyRes.pipe(res);
+        }
     }).on('error', (err) => {
         res.status(500).send("Error en el proxy de video: " + err.message);
     });
 });
 
+// seccion 2
 app.get('/', (req, res) => {
     res.json({ status: "OK", mensaje: "Servidor EIT/EPG y Proxy activo" });
 });
