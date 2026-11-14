@@ -97,7 +97,7 @@ app.get('/api/epg', (req, res) => {
                 var resultado = procesarEventosFinales(eventosCanal);
                 if (!res.headersSent) res.json(resultado);
             }
-        }, 15000);
+        }, 30000);
 
         stream.on('data', (chunk) => {
             if (programaEncontrado) return;
