@@ -6,8 +6,6 @@ const cors = require('cors');
 const app = express();
 app.use(cors());
 
-const https = require('https');
-
 // Endpoint proxy para transmitir canales protegidos con cabeceras
 app.get('/api/stream', (req, res) => {
     const targetUrl = req.query.url;
